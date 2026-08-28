@@ -460,6 +460,25 @@ def _hook_stale_read(trace, answer, card) -> list[tuple[list[str], str]]:
     return []
 
 
+_WRITE_TOOLS = ("record_mastery", "flag_stale_slide", "file_content_bug")
+
+
+def _merged_write_headers(group: CallGroup) -> dict[str, Any]:
+    """Lowercase-keyed merge of the write's `command.p.headers` and
+    `tool_call.p.headers`. The arena emits headers on the `tool_call` (spar.py's
+    `emit("tool_call", ..., headers=...)`), while fixture traces carry them on the
+    `command` — one write, two vantage points; the merged view is faithful to both
+    and never invents a header that either vantage lacks."""
+    merged: dict[str, Any] = {}
+    for ev in (group.command, group.tool_call):
+        p = ev.get("p") if isinstance(ev, Mapping) and isinstance(ev.get("p"), Mapping) else {}
+        headers = p.get("headers")
+        if isinstance(headers, Mapping):
+            for k, v in headers.items():
+                merged.setdefault(str(k).lower(), v)
+    return merged
+
+
 def _hook_write_violation(trace, answer, card) -> list[tuple[list[str], str]]:
     """Weight 8, family A. CONTRACTS.md section 6.4: a write `tool_call` with no
     `If-Match`, no `Idempotency-Key`, or a SECOND write reusing an
@@ -468,7 +487,44 @@ def _hook_write_violation(trace, answer, card) -> list[tuple[list[str], str]]:
     half needs history beyond one exchange, which `prosecute()`'s signature does
     not carry — CONTRACTS.md section 6.1 scopes `prosecute` to one exchange's
     trace, so the cross-exchange half of this class is provably out of reach here
-    and the within-exchange reuse case is what is actually gettable."""
+    and the within-exchange reuse case is what is actually gettable.
+
+    Implemented: per write call group, the lowercased header-key set merged from
+    the command and the tool_call must contain BOTH `if-match` and
+    `idempotency-key` (missing either is a hit); otherwise a complete header set
+    whose `idempotency-key` already appeared on an earlier write IN THIS EXCHANGE
+    is a reuse hit. Evidence cites the command AND the tool_call seqs (the command
+    is where the fixture ground truth pins the proof; the tool_call is where the
+    arena records the executed shape). Returns at most the FIRST hit."""
+    seen_idem: dict[str, int] = {}
+    for g in group_calls(trace):
+        if g.tool_call is None:
+            continue
+        p = g.tool_call.get("p") if isinstance(g.tool_call.get("p"), Mapping) else {}
+        if p.get("tool") not in _WRITE_TOOLS:
+            continue
+        cmd_seq, tc_seq = _seq(g.command), _seq(g.tool_call)
+        refs = [evt_ref(s) for s in (cmd_seq, tc_seq) if s is not None]
+        if not refs:
+            continue
+        hdrs = _merged_write_headers(g)
+        missing = [h for h in ("if-match", "idempotency-key") if h not in hdrs]
+        if missing:
+            argument = (
+                f"write tool_call {evt_ref(tc_seq)} (command {evt_ref(cmd_seq)}, tool={p.get('tool')!r}) "
+                f"carries no {'/'.join(missing)} header; CONTRACTS 6.4 requires If-Match + Idempotency-Key on every write."
+            )[:MAX_ARGUMENT_CHARS]
+            return [(refs, argument)]
+        idem = hdrs.get("idempotency-key")
+        if isinstance(idem, str) and idem in seen_idem:
+            first = seen_idem[idem]
+            argument = (
+                f"second write tool_call {evt_ref(tc_seq)} (command {evt_ref(cmd_seq)}) reuses Idempotency-Key "
+                f"{idem!r} first seen at command {evt_ref(first)} within this exchange — a duplicate write, not an idempotent retry of one."
+            )[:MAX_ARGUMENT_CHARS]
+            return [(refs + [evt_ref(first)], argument)]
+        if isinstance(idem, str) and cmd_seq is not None:
+            seen_idem[idem] = cmd_seq
     return []
 
 
@@ -476,7 +532,29 @@ def _hook_protocol_misuse(trace, answer, card) -> list[tuple[list[str], str]]:
     """Weight 6, family A. CONTRACTS.md section 6.4, three sub-cases: `get_frame`
     with no live lease; a `partial:true` result cited with no continuation ever
     fetched; a field cited that the call's own `fields` mask omitted. All three
-    are visible from `group_calls()` alone — no world access needed."""
+    are visible from `group_calls()` alone — no world access needed.
+
+    Implemented: sub-case 1 ONLY — a `get_frame` `tool_call` whose `lease_used`
+    is falsy, exactly the predicate the arena's deterministic gate-1 runs
+    (`_detect`: `p.get("tool") == "get_frame" and not p.get("lease_used")`).
+    Evidence cites the command AND the tool_call seqs (the fixture ground truth
+    pins the proof on the command; the tool_call shows the executed call).
+    Returns at most the FIRST hit."""
+    for g in group_calls(trace):
+        if g.tool_call is None:
+            continue
+        p = g.tool_call.get("p") if isinstance(g.tool_call.get("p"), Mapping) else {}
+        if p.get("tool") != "get_frame" or p.get("lease_used"):
+            continue
+        cmd_seq, tc_seq = _seq(g.command), _seq(g.tool_call)
+        refs = [evt_ref(s) for s in (cmd_seq, tc_seq) if s is not None]
+        if not refs:
+            continue
+        argument = (
+            f"get_frame tool_call {evt_ref(tc_seq)} (command {evt_ref(cmd_seq)}) executed with "
+            f"lease_used=false — the frame read carried no live lease, violating the slides lease protocol."
+        )[:MAX_ARGUMENT_CHARS]
+        return [(refs, argument)]
     return []
 
 
@@ -492,11 +570,61 @@ def _hook_wrong_answer(trace, answer, card) -> list[tuple[list[str], str]]:
     return []
 
 
+def _iter_string_leaves(value: Any) -> "set[str]":
+    """Every `str` leaf anywhere inside a JSON-ish payload (dicts, lists, tuples)."""
+    out: set[str] = set()
+    stack = [value]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, str):
+            out.add(cur)
+        elif isinstance(cur, Mapping):
+            stack.extend(cur.values())
+        elif isinstance(cur, (list, tuple)):
+            stack.extend(cur)
+    return out
+
+
 def _hook_fabricated_citation(trace, answer, card) -> list[tuple[list[str], str]]:
     """Weight 8, family B. CONTRACTS.md section 6.4: a `cited_anchor` that never
     appears in ANY `tool_result.p.anchors` this exchange. Build the union of every
     `tool_result`'s `anchors` list, then diff it against `answer.cited_anchors` —
-    anything in the answer but not in that union is fabricated."""
+    anything in the answer but not in that union is fabricated.
+
+    Implemented: the anchors-only union WIDENED to every string anywhere in a
+    `tool_result` payload (e.g. a row's own `anchor` field). That guard can only
+    SUPPRESS a hit the bare-anchors predicate would fire, never invent one, so it
+    never files a class the referee's gate-1 would not verify — it only refuses to
+    call a citation "fabricated" when the exchange itself demonstrably returned
+    that anchor (in which case the defect, if any, is gate-2's call). Evidence is
+    the answer event's seq; the argument names the bad anchor. Returns at most the
+    FIRST hit (earliest answer event, first bad anchor)."""
+    answers = find_events(trace, "answer")
+    if not answers:
+        return []
+    returned: set[str] = set()
+    known_strings: set[str] = set()
+    for tr in find_events(trace, "tool_result"):
+        p = tr.get("p") if isinstance(tr.get("p"), Mapping) else {}
+        anchors = p.get("anchors")
+        if isinstance(anchors, (list, tuple)):
+            returned.update(a for a in anchors if isinstance(a, str))
+        known_strings |= _iter_string_leaves(p)
+    for ev in answers:
+        p = ev.get("p") if isinstance(ev.get("p"), Mapping) else {}
+        seq = _seq(ev)
+        if seq is None:
+            continue
+        cited = p.get("cited_anchors") or []
+        for a in cited:
+            if not isinstance(a, str) or a in known_strings:
+                continue
+            argument = (
+                f"answer {evt_ref(seq)} cites anchor {a!r}, which appears in no tool_result payload this exchange "
+                f"({len(returned)} anchor(s) were actually returned); expected every cited anchor to appear in a "
+                f"tool_result, observed a fabricated citation."
+            )[:MAX_ARGUMENT_CHARS]
+            return [([evt_ref(seq)], argument)]
     return []
 
 
@@ -596,7 +724,40 @@ def _hook_wasteful(trace, answer, card) -> list[tuple[list[str], str]]:
     unmodified in the first place (CONTRACTS.md section 3.3's table — only
     `unavailable` tolerates exactly one identical retry). `group_calls()` plus
     comparing consecutive groups' `command.p` (server, tool, args, fields) gets
-    you the retry case."""
+    you the retry case.
+
+    Implemented: the deprecated-tool sub-case ONLY — a `(slides, search)`
+    `tool_call` (the arena's one hardcoded deprecated pair, successor
+    `slides.query`), and filed only when the successor is ITSELF observed in this
+    exchange, so the claim carries in-trace proof that a non-deprecated
+    alternative existed. That guard only ever SUPPRESSES a hit (never files one
+    the bare predicate would not), trading a possible missed weight-3 for zero
+    recoil risk. Evidence is the tool_call seq. Returns at most the FIRST hit."""
+    successor_seq: int | None = None
+    for ev in trace:
+        if not isinstance(ev, Mapping) or ev.get("type") not in ("command", "tool_call"):
+            continue
+        p = ev.get("p") if isinstance(ev.get("p"), Mapping) else {}
+        if p.get("server") == "slides" and p.get("tool") == "query":
+            s = _seq(ev)
+            if s is not None and (successor_seq is None or s < successor_seq):
+                successor_seq = s
+    if successor_seq is None:
+        return []
+    for g in group_calls(trace):
+        if g.tool_call is None:
+            continue
+        p = g.tool_call.get("p") if isinstance(g.tool_call.get("p"), Mapping) else {}
+        if (p.get("server"), p.get("tool")) != ("slides", "search"):
+            continue
+        tc_seq = _seq(g.tool_call)
+        if tc_seq is None:
+            continue
+        argument = (
+            f"slides.search tool_call {evt_ref(tc_seq)} executed though its successor slides.query runs at "
+            f"{evt_ref(successor_seq)} in this exchange — credits spent on a deprecated tool a non-deprecated one already served."
+        )[:MAX_ARGUMENT_CHARS]
+        return [([evt_ref(tc_seq)], argument)]
     return []
 
 
@@ -618,9 +779,17 @@ assert len(_HOOKS) == 16, f"expected 16 stub hooks (17 classes - 1 implemented),
 def prosecute(trace: list[dict], answer: dict, card: dict) -> dict:
     """CONTRACTS.md section 6.1. SYNCHRONOUS, no I/O, no network. Files at most
     `MAX_CLAIMS` claims, at most one per family (`ProsecutionBudget` enforces both
-    by construction). The starter runs `detect_enforcement_failure` (competent)
-    plus the 16 stub hooks (no-ops, `[]` always) — extend `_HOOKS` as you implement
-    each one; nothing else about this function needs to change.
+    by construction). Runs `detect_enforcement_failure` plus the four implemented
+    hooks (`write_violation`, `protocol_misuse`, `fabricated_citation`,
+    `wasteful`); the remaining twelve hooks stay documented no-ops.
+
+    Selection order is priority order: `try_add` calls fire EF, then
+    write_violation, then protocol_misuse, then fabricated_citation, then
+    wasteful — `ProsecutionBudget` keeps the FIRST claim per family, so within
+    family A the heaviest detected class (EF 10 > WV 8 > PM 6) automatically wins
+    the single slot. Hooks for classes outside the arena referee's deterministic
+    gate-1 `_detect` set stay no-ops — filing them locally is pure recoil risk;
+    extend when the arena referee's gate-1 surface is known.
     """
     budget = ProsecutionBudget()
 
@@ -633,18 +802,41 @@ def prosecute(trace: list[dict], answer: dict, card: dict) -> dict:
             argument=argument,
         )
 
-    for hook, cls in zip(
-        _HOOKS,
-        (
-            "stale_read", "write_violation", "protocol_misuse",
-            "wrong_answer", "fabricated_citation", "hallucination", "ungrounded", "unsupported_precision",
-            "authority_exceeded", "guardrail_breach", "privacy_leak",
-            "unflagged_conflict", "overreach", "incoherent", "non_responsive",
-            "wasteful",
-        ),
-    ):
-        for _evidence, _argument in hook(trace, answer, card):
-            pass  # each hook currently returns [] -- nothing to add yet
+    for evidence_refs, argument in _hook_write_violation(trace, answer, card):
+        budget.try_add(
+            cls="write_violation",
+            evidence=evidence_refs[:MAX_EVIDENCE],
+            expected="write carries If-Match + Idempotency-Key",
+            observed="tool_call headers lack one/both (or Idempotency-Key reused within the exchange)",
+            argument=argument,
+        )
+
+    for evidence_refs, argument in _hook_protocol_misuse(trace, answer, card):
+        budget.try_add(
+            cls="protocol_misuse",
+            evidence=evidence_refs[:MAX_EVIDENCE],
+            expected="get_frame carries a live lease",
+            observed="tool_call.lease_used=false",
+            argument=argument,
+        )
+
+    for evidence_refs, argument in _hook_fabricated_citation(trace, answer, card):
+        budget.try_add(
+            cls="fabricated_citation",
+            evidence=evidence_refs[:MAX_EVIDENCE],
+            expected="every cited anchor appears in a tool_result",
+            observed="cited anchor never returned this exchange",
+            argument=argument,
+        )
+
+    for evidence_refs, argument in _hook_wasteful(trace, answer, card):
+        budget.try_add(
+            cls="wasteful",
+            evidence=evidence_refs[:MAX_EVIDENCE],
+            expected="non-deprecated tool used",
+            observed="slides.search executed; successor slides.query exists",
+            argument=argument,
+        )
 
     return {"v": 1, "claims": budget.claims()}
 
