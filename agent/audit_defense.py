@@ -17,6 +17,7 @@ separately as harness noise, not as a gateway failure.
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import spar  # noqa: E402
+from agent.guardrails import finalize_answer  # noqa: E402
 from kit.referee.rubric import weight_of  # noqa: E402
 
 NOISE_SUFFIX = "/w/999"
@@ -37,11 +39,40 @@ def _is_noise(hit: dict) -> bool:
         (hit.get("anchor") or "").endswith(NOISE_SUFFIX)
 
 
+def _apply_guardrails(trace: list[dict], act: str) -> list[dict]:
+    """Simulate what the arena's answer-assembly wrapper does: run
+    `finalize_answer` over the exchange's answer event with the anchors the
+    exchange actually retrieved, and strip what never grounded. Returns a
+    patched copy of the trace for detector comparison."""
+    retrieved: set[str] = set()
+    answer_seq = None
+    for e in trace:
+        p = e.get("p", {})
+        if e.get("type") == "tool_result":
+            retrieved.update(a for a in (p.get("anchors") or []) if isinstance(a, str))
+        elif e.get("type") == "answer":
+            answer_seq = e["seq"]
+    if answer_seq is None:
+        return trace
+    out: list[dict] = []
+    for e in trace:
+        if e.get("seq") == answer_seq and e.get("type") == "answer":
+            final = finalize_answer(e["p"], retrieved)
+            patched = json.loads(json.dumps(e))
+            patched["p"]["cited_anchors"] = list(final.cited_anchors)
+            out.append(patched)
+        else:
+            out.append(e)
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bot", choices=spar.BOTS, default="rookie")
     ap.add_argument("--rounds", type=int, default=10)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--guardrails", action="store_true",
+                    help="also report the hits finalize_answer would prevent (fabricated citations stripped)")
     a = ap.parse_args(argv)
 
     world = spar._load_world()
@@ -51,6 +82,7 @@ def main(argv=None) -> int:
 
     real_hits: list[dict] = []
     noise_hits: list[dict] = []
+    prevented_hits: list[dict] = []
     real_by_round: dict[int, list] = {}
 
     print(f"\n  DEFENCE AUDIT — vs {a.bot.upper()}  (seed {a.seed}, {a.rounds} rounds)")
@@ -63,6 +95,10 @@ def main(argv=None) -> int:
             prosecute_fn=lambda *args, **kwargs: {"claims": []}, card=card,
             world=world, rnd=r, rng=random.Random(a.seed), act="learner:sv-0417")
         hits = spar._detect(res["trace"], card, "learner:sv-0417")
+        if a.guardrails:
+            patched = spar._detect(_apply_guardrails(res["trace"], "learner:sv-0417"), card, "learner:sv-0417")
+            kept_keys = {(h["cls"], h["seq"]) for h in patched}
+            prevented_hits.extend(h for h in hits if (h["cls"], h["seq"]) not in kept_keys)
         rn = [h for h in hits if _is_noise(h)]
         rl = [h for h in hits if not _is_noise(h)]
         noise_hits.extend(rn)
@@ -104,6 +140,14 @@ def main(argv=None) -> int:
     else:
         for h in noise_hits:
             print(f"     fabricated_citation  evt:{h['seq']:04d}  anchor={h.get('anchor')}")
+
+    if a.guardrails:
+        print(f"\n  PREVENTED BY GUARDRAILS (finalize_answer strips these before submission):")
+        if not prevented_hits:
+            print("     (none)")
+        else:
+            for h in prevented_hits:
+                print(f"     {h['cls']}  evt:{h['seq']:04d}  anchor={h.get('anchor', '')}")
 
     return 0 if not real_hits else 1
 

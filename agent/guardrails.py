@@ -50,6 +50,16 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+# Direct execution (`python agent/guardrails.py`) puts agent/ — not the repo
+# root — on sys.path, so the kit import below would fail and silently degrade
+# the anchor-syntax leg of check_grounding. Fix the path first (same shim as
+# agent/gateway.py's).
+if __package__ in (None, ""):  # pragma: no cover - direct-run convenience only
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
 # kit.world.anchor is a collaborator's file (workspace hard rule 2). Present
 # and stable as of this writing; degraded gracefully so `check_grounding`
 # still runs (with the anchor-syntax leg of the check skipped, not silently
@@ -72,6 +82,8 @@ __all__ = [
     "ArithmeticCheckResult",
     "verify_arithmetic",
     "abstention_policy",
+    "FinalizedAnswer",
+    "finalize_answer",
 ]
 
 
@@ -263,6 +275,68 @@ def abstention_policy(grounding: GroundingResult) -> bool:
     costs more than an honest 'insufficient grounding'" — this function is
     the bare floor of that policy, not the ceiling."""
     return not grounding.grounded
+
+
+# ---------------------------------------------------------------------------
+# 6. ANSWER FINALISATION — the seam between the model's draft and the
+#    ANSWER action actually submitted. This is where fabricated citations
+#    die: a citation the exchange never retrieved is STRIPPED (the prose
+#    stays, the false anchor does not), and only an answer with nothing
+#    left to vouch for abstains.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class FinalizedAnswer:
+    text: str
+    cited_anchors: tuple[str, ...]
+    abstained: bool
+    dropped_anchors: tuple[str, ...]  # stripped before submission: malformed + never-retrieved
+    redaction_hits: tuple[str, ...]
+    injection_flag: bool  # suspicious instruction detected in the text (caller's call what to do)
+
+
+def finalize_answer(
+    answer: Mapping[str, Any],
+    retrieved_anchors: Iterable[str],
+    *,
+    require_citation: bool = True,
+) -> FinalizedAnswer:
+    """Run every guardrail over the model's draft and return the shape the
+    ANSWER action should carry. Order matters and is deliberate:
+
+      1. GROUNDING STRIP — every cited anchor that is malformed OR was never
+         retrieved this exchange is dropped, not shipped. Economics: a
+         fabricated citation is weight 8 (and a prosecutor's free win);
+         the same sentence with only real anchors is at worst `ungrounded`
+         prose (5) — and with the strip, not even that. Keeping the
+         grounded citations (rather than abstaining wholesale) preserves a
+         correct answer's `wrong_answer` defence.
+      2. ABSTAIN when nothing survives to cite (and the ask expects a
+         citation) — "insufficient grounding" beats a guess.
+      3. REDACTION over the text (private fields never ship).
+      4. INJECTION SCAN — flagged, not acted on: the model's wording is
+         its own; this is the caller's signal to re-prompt or refuse.
+
+    This is the function the answer-assembly wrapper around `kit.loop.Agent`
+    calls right before emitting the ANSWER action — never the gateway
+    (an ANSWER is not a Command and never reaches `Gateway.decide`)."""
+    grounding = check_grounding(answer, retrieved_anchors, require_citation=False)
+    kept = tuple(a for a in grounding.cited if a not in grounding.ungrounded and a not in grounding.malformed)
+    dropped = tuple(a for a in grounding.cited if a not in kept)
+
+    abstained = not kept and (require_citation or bool(grounding.cited))
+    text = str(answer.get("text", ""))
+    redaction = redact(text)
+    scan = scan_for_injected_instructions(redaction.redacted_text)
+    return FinalizedAnswer(
+        text=redaction.redacted_text,
+        cited_anchors=kept,
+        abstained=abstained,
+        dropped_anchors=dropped,
+        redaction_hits=redaction.hits,
+        injection_flag=scan.suspicious,
+    )
 
 
 if __name__ == "__main__":
