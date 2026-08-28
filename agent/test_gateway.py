@@ -329,3 +329,109 @@ def test_200_clean_decides_each_under_250ms():
         elapsed = time.perf_counter() - t0
         assert decision.verdict in {"forward", "deny", "rewrite"}
         assert elapsed < 0.250, f"decide #{i} took {elapsed * 1000:.1f} ms"
+
+
+# ---------------------------------------------------------------------------
+# 13. FIX 1 — wider learner-target keys (learner_id / target / subject)
+# ---------------------------------------------------------------------------
+
+def test_learner_id_mismatch_denied():
+    gw = Gateway(make_ctx())
+    decision = gw.decide(make_cmd(args={"q": "mcp", "learner_id": "learner:sv-0392"}))
+    assert decision.verdict == "deny"
+    assert decision.call is None
+    assert "learner_id" in decision.reason
+
+
+def test_learner_id_matching_act_forwards_clean_a2a():
+    gw = Gateway(make_ctx())
+    gw.note_card("curriculum-analyst", {"verified": True, "skills": ["which_days_cover"]})
+    decision = gw.decide(
+        make_cmd(
+            kind="a2a",
+            server="curriculum-analyst",
+            tool="which_days_cover",
+            args={"learner_id": ACT},
+            headers={"aud": "curriculum-analyst"},
+        )
+    )
+    assert decision.verdict == "forward", decision.reason
+    assert call_dict(decision)["tool"] == "which_days_cover"
+
+
+def test_subject_topic_string_forwards_false_positive_guard():
+    gw = Gateway(make_ctx())
+    decision = gw.decide(make_cmd(args={"q": "mcp", "subject": "Streamable HTTP"}))
+    assert decision.verdict == "forward", decision.reason
+
+
+def test_target_identity_shaped_mismatch_denied():
+    gw = Gateway(make_ctx())
+    decision = gw.decide(make_cmd(args={"q": "mcp", "target": "learner:sv-0392"}))
+    assert decision.verdict == "deny"
+    assert decision.call is None
+    assert "'target'" in decision.reason
+
+
+def test_target_matching_act_forwards():
+    gw = Gateway(make_ctx())
+    decision = gw.decide(make_cmd(args={"q": "mcp", "target": ACT}))
+    assert decision.verdict == "forward", decision.reason
+
+
+# ---------------------------------------------------------------------------
+# 14. FIX 2 — catalog-trap clamp in JOB 4 (BUDGET)
+# ---------------------------------------------------------------------------
+
+def test_list_servers_empty_mask_rewritten_to_name():
+    gw = Gateway(make_ctx())
+    decision = gw.decide(make_cmd(server="registry", tool="list_servers", fields=()))
+    assert decision.verdict == "rewrite"
+    assert decision.call is not None
+    d = call_dict(decision)
+    assert d["server"] == "registry"
+    assert d["tool"] == "list_servers"
+    assert tuple(d["fields"]) == ("name",)
+
+
+def test_list_servers_star_mask_rewritten_to_name():
+    gw = Gateway(make_ctx())
+    decision = gw.decide(make_cmd(server="registry", tool="list_servers", fields=("*",)))
+    assert decision.verdict == "rewrite"
+    assert tuple(call_dict(decision)["fields"]) == ("name",)
+
+
+def test_list_servers_explicit_narrow_mask_forwards_untouched():
+    gw = Gateway(make_ctx())
+    decision = gw.decide(make_cmd(server="registry", tool="list_servers", fields=("name",)))
+    assert decision.verdict == "forward", decision.reason
+    assert tuple(call_dict(decision)["fields"]) == ("name",)
+
+
+def test_list_terms_empty_mask_rewritten_to_term():
+    gw = Gateway(make_ctx())
+    decision = gw.decide(make_cmd(server="glossary", tool="list_terms", fields=()))
+    assert decision.verdict == "rewrite"
+    assert decision.call is not None
+    d = call_dict(decision)
+    assert d["server"] == "glossary"
+    assert d["tool"] == "list_terms"
+    assert tuple(d["fields"]) == ("term",)
+
+
+def test_list_terms_explicit_narrow_mask_forwards_untouched():
+    gw = Gateway(make_ctx())
+    decision = gw.decide(
+        make_cmd(server="glossary", tool="list_terms", fields=("term", "definition"))
+    )
+    assert decision.verdict == "forward", decision.reason
+    # ToolCall canonicalises (sort/dedupe/lowercase); the gateway never touches it.
+    assert sorted(call_dict(decision)["fields"]) == ["definition", "term"]
+
+
+def test_reserve_floor_still_denies_list_servers_below_floor():
+    gw = Gateway(make_ctx(credits=20))
+    decision = gw.decide(make_cmd(server="registry", tool="list_servers", fields=()))
+    assert decision.verdict == "deny"
+    assert decision.call is None
+    assert "reserve floor" in decision.reason

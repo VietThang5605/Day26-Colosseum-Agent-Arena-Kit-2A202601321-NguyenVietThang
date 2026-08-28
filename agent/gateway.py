@@ -65,7 +65,8 @@ AUTHORIZE, BUDGET — each implemented: ROUTE trusts only `headers` for
 replica information, ADMIT denies the mutation artifacts (and the
 lease/write/peer-card protocol violations) for free, AUTHORIZE derives
 authority from `ctx.act` (never `ctx.sub`) plus audience and scope checks,
-and BUDGET holds a reserve floor and rewrites the one deprecated tool.
+and BUDGET holds a reserve floor, rewrites the deprecated tool, and clamps
+the two catalog-trap tools' default/full masks to a narrow per-tool mask.
 The whole body is wrapped so that no input, ever, can make it raise or
 return anything but a valid `Decision`.
 
@@ -119,6 +120,7 @@ try:
 except ImportError:  # pragma: no cover - collaborator file
     _canonicalise_action = None
 
+from agent.strategy import is_catalog_trap as _is_catalog_trap
 from agent.telemetry import RecordingGatewayContext, Telemetry
 
 __all__ = [
@@ -159,6 +161,17 @@ RESERVE_FLOOR: int = 25
 _FLOOR_ALLOWED: frozenset[tuple[str, str]] = frozenset(
     {("registry", "provenance"), ("slides", "query")}
 )
+
+# The narrow mask each catalog-trap tool ("punishment button",
+# agent/strategy.py's CATALOG_TRAP_TOOLS) is rewritten to when the caller left
+# the mask empty or asked for "*". Both are the cheapest sensible listing per
+# kit/mcp.specs.TOOL_SPECS: ("name",) costs 2 (base 1 + weight 1) against the
+# 12-cr full dump, and ("term",) costs 2 against the 10-cr full dump (the spec
+# itself names fields=["term"] as the disciplined path for list_terms).
+_CATALOG_CLAMP_MASKS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("registry", "list_servers"): ("name",),
+    ("glossary", "list_terms"): ("term",),
+}
 
 
 def _SAFE_DENY() -> Decision:
@@ -478,9 +491,27 @@ class Gateway:
             # Authority derives from `ctx.act` (whom we serve), NEVER from
             # `ctx.sub` (what we are) — the confused-deputy lesson
             # bots/operator/gateway.py gets exactly wrong at weight 10.
-            target = cmd.args.get("learner")
-            if target is not None and target != self.ctx.act:
-                return self.deny(cmd, f"cross-learner target: {target!r} != act {self.ctx.act!r}")
+            # Wider learner-target keys — the same four the kit's strongest bot
+            # checks in `_act_owns_target` (bots/adversary/gateway.py), but with
+            # a false-positive guard for "target"/"subject": a legit arg named
+            # `subject` may carry a topic string like "Streamable HTTP", and
+            # denying clean traffic loses information for nothing — so such a
+            # value counts as a learner target only when it is an
+            # identity-shaped str ("learner:"/"Learner:" prefix). adversary's
+            # unguarded variant would deny exactly such clean calls.
+            for key in ("learner", "learner_id", "target", "subject"):
+                value = cmd.args.get(key)
+                if value is None:
+                    continue
+                if key in ("target", "subject") and not (
+                    isinstance(value, str) and value.startswith(("learner:", "Learner:"))
+                ):
+                    continue  # not identity-shaped: a topic/label, not a learner target
+                if value != self.ctx.act:
+                    return self.deny(
+                        cmd,
+                        f"cross-learner target ({key!r}): {value!r} != act {self.ctx.act!r}",
+                    )
             # Delegation audience: an A2A hop aimed at a different server than
             # the one named on the command is a misdirected delegation.
             if cmd.kind == "a2a" and "aud" in cmd.headers and cmd.headers["aud"] != cmd.server:
@@ -493,15 +524,51 @@ class Gateway:
 
             # ------------------------------------------------------------------
             # JOB 4 — BUDGET: can the DUEL (all 10 rounds, not just this call)
-            # actually afford `routed` as written? `fields` pass through
-            # untouched — the empty mask is the cheapest legitimate choice in
-            # this harness, and rewriting masks here would only spend verdict
-            # complexity to save credits the caller already chose.
+            # actually afford `routed` as written?
+            # Catalog-trap clamp: the two "punishment button" tools
+            # ("registry.list_servers" / "glossary.list_terms") price their
+            # DEFAULT mask as their full dump (12 / 10 cr — kit/mcp/specs.py).
+            # is_catalog_trap fires ONLY on an empty mask or ("*",), so a
+            # model-chosen NARROW mask always passes through untouched —
+            # dropping a field you then cite is the ungrounded-answer class
+            # (mechanic 1), and this clamp never manufactures that.
+            clamped_fields: tuple[str, ...] | None = None
+            if _is_catalog_trap(cmd.server, cmd.tool, tuple(cmd.fields)):
+                clamped_fields = _CATALOG_CLAMP_MASKS.get((cmd.server, cmd.tool), ())
+            # Reserve floor: below RESERVE_FLOOR only the two cheapest
+            # information calls survive. The clamp above narrows the *mask*,
+            # never the tool — a clamped list_servers is still not in
+            # _FLOOR_ALLOWED, so the floor still denies it here. Deterministic
+            # and simple: the floor wins over the rewrite.
             if self.ctx.credits < RESERVE_FLOOR and (cmd.server, cmd.tool) not in _FLOOR_ALLOWED:
                 return self.deny(cmd, "reserve floor")
+            if clamped_fields is not None:
+                clamped = Command(
+                    cmd_id=cmd.cmd_id,
+                    kind=cmd.kind,
+                    raw=cmd.raw,
+                    server=cmd.server,
+                    tool=cmd.tool,
+                    args=dict(cmd.args),
+                    fields=clamped_fields,
+                    headers=dict(cmd.headers),
+                    lease_id=cmd.lease_id,
+                    call_index=cmd.call_index,
+                )
+                decision = Decision(
+                    verdict="rewrite",
+                    call=self._to_tool_call(clamped),
+                    note=(
+                        f"catalog-trap clamp: {cmd.server}.{cmd.tool} default/full mask "
+                        f"narrowed to fields={list(clamped_fields)}"
+                    ),
+                )
+                self._telemetry.decision_made(cmd, decision)
+                return decision
             # Deprecated successor: `slides.search` is wasteful (3) by the time
             # it executes; rewrite it to its replacement, keeping everything
-            # else. This is the ONE rewrite verdict in this file.
+            # else. (One of the file's two rewrite verdicts, alongside the
+            # catalog-trap mask clamp above.)
             if (cmd.server, cmd.tool) == ("slides", "search"):
                 rewritten = Command(
                     cmd_id=cmd.cmd_id,
