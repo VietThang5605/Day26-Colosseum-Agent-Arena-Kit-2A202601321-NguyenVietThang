@@ -551,8 +551,17 @@ def test_starter_end_to_end_against_the_full_fixture_set(labelled_fixtures):
     assert report["per_class"]["enforcement_failure"]["recall"] == 1.0
     assert report["per_class"]["enforcement_failure"]["present"] == 2
     assert report["per_class"]["enforcement_failure"]["verified"] == 2
-    # the four implemented gate-1 classes are claimed when present
-    _IMPLEMENTED = {"enforcement_failure", "write_violation", "protocol_misuse", "fabricated_citation"}
+    # the implemented gate-1 classes are claimed when present
+    _IMPLEMENTED = {
+        "enforcement_failure",
+        "authority_exceeded",
+        "write_violation",
+        "stale_read",
+        "protocol_misuse",
+        "fabricated_citation",
+        "privacy_leak",
+        "wasteful",
+    }
     for cls in _IMPLEMENTED - {"enforcement_failure"}:
         assert report["per_class"][cls]["claimed"] >= 1, f"{cls} is implemented but never claimed"
     # every other class: present in the fixtures, but never claimed — filing a
