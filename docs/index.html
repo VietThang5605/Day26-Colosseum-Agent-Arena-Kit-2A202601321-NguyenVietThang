@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Colosseum Agent Arena — Web Duel Simulator ⚔️</title>
+  <link rel="stylesheet" href="./css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚔️</text></svg>">
+</head>
+<body>
+
+  <div class="arena-container">
+    <!-- Header -->
+    <header class="arena-header">
+      <div class="logo-group">
+        <div class="logo-icon">⚔️</div>
+        <div class="logo-text">
+          <h1>COLOSSEUM WEB ARENA</h1>
+          <p>Autonomous AI Multi-Agent Pixel Battle Simulator</p>
+        </div>
+      </div>
+      <div class="header-status">
+        <div class="status-badge" id="engineStatusBadge">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusText">Đang khởi tạo Pyodide...</span>
+        </div>
+        <a href="https://github.com/VietThang5605/Day26-Colosseum-Agent-Arena-Kit-2A202601321-NguyenVietThang" target="_blank" class="btn-github">
+          <svg height="16" width="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </header>
+
+    <!-- Fighter Setup Section -->
+    <section class="match-setup">
+      <!-- Side A -->
+      <div class="fighter-card side-a">
+        <div class="fighter-header">
+          <span class="fighter-badge">PLAYER A (CHALLENGER)</span>
+          <span class="fighter-hp" id="previewHpA">HP 100</span>
+        </div>
+        <div class="fighter-title" id="fighterTitleA">👑 Champion Bot</div>
+        
+        <div class="preset-select-wrapper">
+          <label>Chọn Bot Mẫu Sẵn Có</label>
+          <select class="preset-select" id="presetSelectA">
+            <option value="champion" selected>👑 Champion (Our Winning Kit)</option>
+            <option value="adversary">💀 Adversary (Elite Bot)</option>
+            <option value="operator">⚡ Operator (Aggressive Bot)</option>
+            <option value="rookie">🌱 Rookie (Starter Bot)</option>
+            <option value="custom">📁 Custom Uploaded Bundle</option>
+          </select>
+        </div>
+
+        <div class="upload-dropzone-wrapper">
+          <label>Hoặc Tải lên file .bundle / .zip của bạn</label>
+          <div class="dropzone" id="dropzoneA">
+            <div class="dropzone-icon">📥</div>
+            <div class="dropzone-text">Kéo thả file <span>.bundle</span> hoặc click để chọn</div>
+            <input type="file" id="fileInputA" accept=".bundle,.zip,.json" style="display: none;" />
+            <div class="file-info" id="fileInfoA">Đang dùng: team-vlearn-champion.bundle</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- VS Controls -->
+      <div class="vs-controls">
+        <div class="vs-emblem">VS</div>
+        <div class="controls-card">
+          <div class="control-item">
+            <label>Hạt giống ngẫu nhiên (Seed)</label>
+            <input type="number" class="control-input" id="seedInput" value="1" min="1" max="999999" />
+          </div>
+          <div class="control-item">
+            <label>Số hiệp đấu (Rounds)</label>
+            <input type="number" class="control-input" id="roundsInput" value="10" min="1" max="10" />
+          </div>
+          <button class="btn-fight" id="btnFight">START BATTLE!</button>
+        </div>
+      </div>
+
+      <!-- Side B -->
+      <div class="fighter-card side-b">
+        <div class="fighter-header">
+          <span class="fighter-badge">PLAYER B (DEFENDER)</span>
+          <span class="fighter-hp" id="previewHpB">HP 100</span>
+        </div>
+        <div class="fighter-title" id="fighterTitleB">💀 Adversary Bot</div>
+        
+        <div class="preset-select-wrapper">
+          <label>Chọn Bot Mẫu Sẵn Có</label>
+          <select class="preset-select" id="presetSelectB">
+            <option value="champion">👑 Champion (Our Winning Kit)</option>
+            <option value="adversary" selected>💀 Adversary (Elite Bot)</option>
+            <option value="operator">⚡ Operator (Aggressive Bot)</option>
+            <option value="rookie">🌱 Rookie (Starter Bot)</option>
+            <option value="custom">📁 Custom Uploaded Bundle</option>
+          </select>
+        </div>
+
+        <div class="upload-dropzone-wrapper">
+          <label>Hoặc Tải lên file .bundle / .zip của đối thủ</label>
+          <div class="dropzone" id="dropzoneB">
+            <div class="dropzone-icon">📥</div>
+            <div class="dropzone-text">Kéo thả file <span>.bundle</span> hoặc click để chọn</div>
+            <input type="file" id="fileInputB" accept=".bundle,.zip,.json" style="display: none;" />
+            <div class="file-info" id="fileInfoB">Đang dùng: bot-adversary</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Canvas Arena Stage -->
+    <section class="arena-screen-wrapper">
+      <div class="canvas-container">
+        <canvas id="stage" width="960" height="700"></canvas>
+        <div class="canvas-loading-overlay" id="loadingOverlay">
+          <div class="spinner"></div>
+          <div class="loading-text" id="loadingOverlayText">Đang tải Colosseum Engine...</div>
+        </div>
+      </div>
+
+      <!-- Playback Controls Bar -->
+      <div class="playback-bar">
+        <div class="playback-buttons">
+          <button class="btn-ctrl" id="btnPlayPause">▶ Play</button>
+          <button class="btn-ctrl" id="btnReplay">↺ Replay</button>
+          <button class="btn-ctrl" id="btnPrevRound">⏮ Hiệp trước</button>
+          <button class="btn-ctrl" id="btnNextRound">⏭ Hiệp sau</button>
+        </div>
+
+        <div class="timeline-scrubber">
+          <span class="scrubber-time" id="timeDisplay">0 / 0</span>
+          <input type="range" class="scrubber-slider" id="scrubberSlider" min="0" max="100" value="0" />
+        </div>
+
+        <div class="playback-buttons">
+          <button class="btn-ctrl speed-btn" data-speed="0.5">0.5x</button>
+          <button class="btn-ctrl speed-btn active" data-speed="1">1x</button>
+          <button class="btn-ctrl speed-btn" data-speed="2">2x</button>
+          <button class="btn-ctrl speed-btn" data-speed="4">4x</button>
+          <button class="btn-ctrl speed-btn" data-speed="999">Max</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Match Summary & Breakdown Dashboard -->
+    <section class="match-dashboard">
+      <div class="dashboard-header">
+        <div class="dashboard-title">📊 BẢNG TỔNG KẾT & PHÂN TÍCH TRẬN ĐẤU</div>
+        <div class="export-group">
+          <button class="btn-export" id="btnExportJsonl">💾 Tải trace.jsonl</button>
+          <button class="btn-export" id="btnExportReport">📄 Xuất Báo Cáo JSON</button>
+        </div>
+      </div>
+
+      <!-- Stats Grid -->
+      <div class="stats-grid">
+        <div class="stat-box">
+          <span class="stat-label">Kết quả Chung cuộc</span>
+          <span class="stat-value" id="summaryWinner">—</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Điểm số (Máu A vs B)</span>
+          <span class="stat-value" id="summaryScore">100 — 100</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Credits còn lại</span>
+          <span class="stat-value" id="summaryCredits">100 / 100</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Tổng số sự kiện</span>
+          <span class="stat-value" id="summaryEvents">0 events</span>
+        </div>
+      </div>
+
+      <!-- Round-by-round Breakdown Table -->
+      <div class="table-wrapper">
+        <table class="rounds-table">
+          <thead>
+            <tr>
+              <th>Hiệp (Round)</th>
+              <th>Hệ số</th>
+              <th>Đòn đánh A</th>
+              <th>Đòn đánh B</th>
+              <th>Sát thương A gây ra</th>
+              <th>Sát thương B gây ra</th>
+              <th>Máu sau hiệp (A / B)</th>
+              <th>Credits (A / B)</th>
+            </tr>
+          </thead>
+          <tbody id="roundsTableBody">
+            <tr>
+              <td colspan="8" style="text-align: center; color: var(--text-dim); padding: 24px;">Chưa có trận đấu nào được chạy. Nhấn "START BATTLE!" để bắt đầu!</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="arena-footer">
+      <p>Colosseum Agent Arena Web Simulator — 100% Client-Side Python WebAssembly (Pyodide)</p>
+    </footer>
+  </div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
